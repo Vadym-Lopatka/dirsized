@@ -384,7 +384,7 @@ test_exit_codes() {
     run "$BIN" help extra
     assert_rc "help takes no PATH" 2
     run "$BIN" --version
-    assert_str "--version" "dirsized 0.1.0" "$(cat "$OUT")"
+    assert_str "--version" "dirsized 0.1.1" "$(cat "$OUT")"
     run ds -- "$LST"
     assert_rc "-- ends options" 0
     mkdir -p "$T/dashes/-l/sub" "$T/dashes/status" "$T/dashes/help"

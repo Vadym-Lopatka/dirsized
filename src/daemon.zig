@@ -34,7 +34,7 @@ const Scanner = scanner_mod.Scanner;
 const Server = server_mod.Server;
 const Watcher = watch.Watcher;
 
-pub const version = "0.1.0";
+pub const version = "0.1.1";
 
 const is_linux = builtin.os.tag == .linux;
 

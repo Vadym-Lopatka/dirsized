@@ -4,7 +4,7 @@
 
 ;; Author: Vadym Lopatka <2900687+Vadym-Lopatka@users.noreply.github.com>
 ;; Maintainer: Vadym Lopatka <2900687+Vadym-Lopatka@users.noreply.github.com>
-;; Version: 0.1.0
+;; Version: 0.1.1
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: files, unix
 ;; URL: https://github.com/Vadym-Lopatka/dirsized

@@ -438,7 +438,7 @@ Then it calls `drain` again, because a result that was applied can owe a re-read
 ### daemon.zig
 
 One owner thread, one `poll()` loop over: listen socket, client sockets, the wake pipe, the
-watcher fd. No other thread touches the table. The version string is `0.1.0` (`daemon.version`).
+watcher fd. No other thread touches the table. The version string is `0.1.1` (`daemon.version`).
 On Linux, after a drain that found events, the watcher fd stays out of the poll set for 100 ms.
 The kernel then merges a write storm into one wakeup. There is no hold when that drain filled its
 read buffer (`Watcher.saturated`): more events wait, and a hold could overflow the kernel queue.
