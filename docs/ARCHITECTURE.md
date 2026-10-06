@@ -34,7 +34,8 @@ src/scan_darwin.zig          getattrlistbulk reader (+ readdir/lstat fallback)
 src/scan_linux.zig           getdents64 + statx reader
 src/scanner.zig              worker pool + owner-side apply loop
 src/server.zig, proto.zig    socket server and wire protocol
-src/paths.zig                socket, lock and snapshot paths
+src/paths.zig                socket, lock, snapshot and metrics log paths
+src/metrics.zig              the optional metrics log (off by default)
 src/watch.zig                Change type, platform selection
 src/watch_darwin.zig         FSEvents watcher
 src/watch_linux.zig          inotify watcher
@@ -228,6 +229,7 @@ pub const Diag = struct { line: u32 = 0, message: []const u8 = "" };  // message
 pub const Config = struct {
     roots: []const []const u8,     // as written, `~` not yet expanded
     exclude: []const []const u8,
+    metrics: bool = false,         // write the metrics log
     pub fn parse(gpa: Allocator, text: []const u8, diag: *Diag) !Config;   // error.BadConfig + diag
     pub fn deinit(self: *Config) void;                                     // one arena
 };
@@ -240,10 +242,11 @@ pub fn compileRules(gpa: Allocator, cfg: *const Config, diag: *Diag) !ignore.Rul
 pub fn resolveRoots(gpa: Allocator, cfg: *const Config, home: []const u8, diag: *Diag) ![][]u8;
 ```
 
-- Missing file, empty file, or a missing key -> defaults: `roots = ["~"]`, `exclude = []`.
-- The parser accepts every valid TOML spelling of: comments, the two top-level keys, arrays of
+- Missing file, empty file, or a missing key -> defaults: `roots = ["~"]`, `exclude = []`,
+  `metrics = false`.
+- The parser accepts every valid TOML spelling of: comments, the three top-level keys, arrays of
   strings (basic `"..."` with all TOML escapes, literal `'...'`; multi-line arrays, trailing comma,
-  comments inside arrays). Anything else (other keys, tables, other value types, multi-line
+  comments inside arrays), and `true` / `false` for `metrics`. Anything else (other keys, tables, other value types, multi-line
   strings) is `error.BadConfig` with the line number and a message a person can act on.
 - Parsing is pure (no file system); `resolveRoots` is the only part that touches the disk.
 
@@ -491,12 +494,54 @@ read buffer (`Watcher.saturated`): more events wait, and a hold could overflow t
   table state, `ok` shown as `stale` while the generation is stale; no node -> `scanning` if the
   deepest existing ancestor is scanning, else `none`.
 - Logs go to stderr, one line per event worth a line. Nothing per query, nothing per change.
+- **Metrics** (only with `metrics = true`): `handle` times each request, `onApplied` reports each
+  folder read, the loop reports each turn, and the loop arms one more timer (`Metrics.sample_at`,
+  every 60 s). The key is not in the spec hash: a change opens or closes the log and starts no scan.
+  A config that parses but has a bad root or pattern still sets the metrics (`Bad.metrics`); one that
+  does not parse keeps them as they were. A new generation that cannot be built leaves them alone too. When the metrics go off and when the daemon stops, the
+  open window is written first.
+
+### metrics.zig
+
+The optional metrics log (DESIGN.md section 13.6). It knows nothing of the table or the server:
+the daemon calls it and passes a `Gauges` value for each sample.
+
+```zig
+pub const interval_ns = 60 s;
+pub const Hist;    // durations in power-of-two buckets: add(ns), quantile(permille), exact max
+pub const Top;     // the 3 slowest of a window with their paths: takes(ns), put(ns, verb, bytes, path)
+pub const Gauges;  // what the daemon knows at a sample: state, folders, rss, queued, clients, events ...
+
+pub const Metrics = struct {
+    sample_at: i64,                                    // the loop must wake up then while `on()`
+    pub fn setPath(m, path) error{NameTooLong}!void;   // `paths.metrics`
+    pub fn on(m) bool;
+    pub fn enable(m, now, version, events) bool;       // opens the file (append, 0600), writes `start`
+    pub fn disable(m) void;                            // writes `stop`, closes
+    pub fn request(m, verb, path, ns, bytes) void;
+    pub fn read(m, ns) bool;                           // true: one of the slowest, call `slowRead`
+    pub fn slowRead(m, ns, path) void;
+    pub fn loopTurn(m, ns) void;
+    pub fn sample(m, now, gauges) void;                // one `sample` line, then the slowest lines; new window
+};
+```
+
+- Fixed size, no allocation. Each line is built in a stack buffer and written with one `write`.
+- Off (`fd == -1`): every function is safe to call and writes nothing. The daemon tests `on()`
+  first only to save the clock reads.
+- Processor time and `rss_max` come from `getrusage(RUSAGE_SELF)` (`ru_maxrss` is bytes on macOS,
+  kilobytes on Linux).
+- At 4 MiB (checked against the real file size) the file is renamed to `metrics.log.1` and a new
+  one is opened; if either step fails, the open file is emptied and used again. A write that fails
+  (full disk) loses that line only.
 
 ### server.zig, proto.zig, paths.zig
 
 `paths.zig`: socket, lock and snapshot paths (DESIGN.md sections 10, 11; Linux without
 `XDG_RUNTIME_DIR` uses the cache folder). The config path is `config.defaultPath`. The daemon has
-no log file: it writes to stderr, and the launchd plist sends stderr to `~/.cache/dirsized/log`. `proto.zig` is pure (no I/O), used by server and client.
+no log file: it writes to stderr, and the launchd plist sends stderr to `~/.cache/dirsized/log`. The metrics log
+(`paths.metrics`, `<cache>/metrics.log`) is a different file and exists only with `metrics = true`. `proto.zig` is pure (no I/O), used by server and client;
+it also has `writeJsonString`, which the command line and the metrics log share.
 
 ```
 request :  size SP PATH NUL  |  list SP PATH NUL  |  status NUL

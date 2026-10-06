@@ -482,6 +482,7 @@ pub const Scanner = struct {
     fn apply(self: *Scanner, table: *Table, job: *const Job) Error!void {
         // The job knows a path, not a node: the node may be gone, or replaced, by now.
         const id = table.lookup(job.pathZ()) orelse return;
+        self.last_read_ns = job.read_ns; // before `denied`: its hook reads this too
         job.result catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             // Not the folder's fault: `failed` and `requeue` read it again.
@@ -503,7 +504,6 @@ pub const Scanner = struct {
         };
         // An entry that could not be inspected may be a folder: applying the list would drop its
         // node (and subtree) as "gone". Keep the last known value and children, say `partial`.
-        self.last_read_ns = job.read_ns;
         if (job.read.entry_errors != 0) return self.denied(table, id, job);
         try self.names.ensureTotalCapacity(self.gpa, job.read.count);
         self.names.clearRetainingCapacity();

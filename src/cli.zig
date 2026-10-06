@@ -67,6 +67,9 @@ const help_text =
     \\after the next query.
     \\  roots = ["~"]                                    # folders to follow
     \\  exclude = ["node_modules/", "/Library/Caches/"]  # .gitignore syntax
+    \\  metrics = true   # off by default. Once a minute: CPU, memory, request
+    \\                   # times and the slowest requests, as JSON lines in
+    \\                   # ~/.cache/dirsized/metrics.log
     \\
     \\Examples:
     \\  dirsized -lh ~/prog          what is big under ~/prog?
@@ -220,28 +223,6 @@ fn humanSize(buf: *[8]u8, n: u64) []const u8 {
     }
 }
 
-/// JSON allows any code point but needs `"`, `\` and controls escaped. A byte that is not
-/// part of valid UTF-8 becomes `\u00XX`, so the output is always valid JSON (a real U+00XX
-/// looks the same; use -0 when exact bytes matter).
-fn writeJsonString(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
-    try w.writeByte('"');
-    var i: usize = 0;
-    while (i < s.len) {
-        const b = s[i];
-        const len: usize = std.unicode.utf8ByteSequenceLength(b) catch 0;
-        if (len > 1 and i + len <= s.len and std.unicode.utf8ValidateSlice(s[i..][0..len])) {
-            try w.writeAll(s[i..][0..len]);
-            i += len;
-            continue;
-        }
-        i += 1;
-        if (b == '"' or b == '\\') try w.writeAll(&.{ '\\', b }) //
-        else if (b < 0x20 or b >= 0x7f) try w.print("\\u{x:0>4}", .{b}) //
-        else try w.writeByte(b);
-    }
-    try w.writeByte('"');
-}
-
 fn writeRecords(w: *std.Io.Writer, records: []const Record, o: Options) std.Io.Writer.Error!void {
     if (o.json) try w.writeByte('[');
     for (records, 0..) |r, i| {
@@ -249,7 +230,7 @@ fn writeRecords(w: *std.Io.Writer, records: []const Record, o: Options) std.Io.W
         if (o.json) {
             if (i > 0) try w.writeByte(',');
             try w.writeAll("{\"path\":");
-            try writeJsonString(w, r.path);
+            try proto.writeJsonString(w, r.path);
             try w.print(",\"bytes\":{d},\"state\":\"{t}\"}}", .{ r.bytes, r.state });
         } else {
             if (o.human) try w.writeAll(humanSize(&hb, r.bytes)) else try w.print("{d}", .{r.bytes});
@@ -550,7 +531,7 @@ fn writeStatusJson(w: *std.Io.Writer, pairs: []const Pair) std.Io.Writer.Error!v
         const array = n > 1 or std.mem.eql(u8, p.key, "root") or std.mem.eql(u8, p.key, "denied");
         if (!first_key) try w.writeByte(',');
         first_key = false;
-        try writeJsonString(w, p.key);
+        try proto.writeJsonString(w, p.key);
         try w.writeByte(':');
         if (array) try w.writeByte('[');
         var shown: usize = 0;
@@ -558,10 +539,10 @@ fn writeStatusJson(w: *std.Io.Writer, pairs: []const Pair) std.Io.Writer.Error!v
             if (!std.mem.eql(u8, q.key, p.key)) continue;
             if (shown > 0) try w.writeByte(',');
             shown += 1;
-            if (statusKeyIsText(q.key)) try writeJsonString(w, q.value) //
+            if (statusKeyIsText(q.key)) try proto.writeJsonString(w, q.value) //
             else if (isNumber(q.value)) try w.writeAll(q.value) //
             else if (std.mem.eql(u8, q.value, "-")) try w.writeAll("null") //
-            else try writeJsonString(w, q.value);
+            else try proto.writeJsonString(w, q.value);
         }
         if (array) try w.writeByte(']');
     }
@@ -613,6 +594,7 @@ fn check(env: Env, o: Options, w: *std.Io.Writer) Stop!u8 {
     try w.print("ok{s}{s}{s}\n", if (loaded.found) .{ "", "", "" } else .{ " (no config file at ", loaded.path, "; defaults apply)" });
     for (roots) |r| try w.print("root\t{s}\n", .{r});
     try w.print("rules\t{d}\n", .{loaded.cfg.exclude.len});
+    try w.print("metrics\t{s}\n", .{if (loaded.cfg.metrics) "on" else "off"});
     if (o.paths.len == 0) return 0;
 
     const arg = try env.arena.dupeZ(u8, o.paths[0]);
@@ -858,7 +840,7 @@ test "JSON string escaping" {
     for (cases) |c| {
         var buf: [64]u8 = undefined;
         var w = std.Io.Writer.fixed(&buf);
-        try writeJsonString(&w, c.in);
+        try proto.writeJsonString(&w, c.in);
         try std.testing.expectEqualStrings(c.out, w.buffered());
     }
 }

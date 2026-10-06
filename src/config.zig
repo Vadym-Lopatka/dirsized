@@ -1,7 +1,7 @@
 //! TOML-subset parser, Config and root validation.
 //!
-//! Only `roots` and `exclude` (arrays of strings) are accepted. Everything else is rejected
-//! with a line number, because people and scripts edit this file by hand.
+//! Only `roots` and `exclude` (arrays of strings) and `metrics` (true or false) are accepted.
+//! Everything else is rejected with a line number, because people and scripts edit this file by hand.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -36,18 +36,21 @@ const default_roots = [_][]const u8{"~"};
 pub const Config = struct {
     roots: []const []const u8, // as written, `~` not yet expanded
     exclude: []const []const u8,
+    /// Write the metrics log (metrics.zig). Off unless the file says `metrics = true`.
+    metrics: bool = false,
     /// Line of each element, for messages from `resolveRoots`. Empty for defaults.
     roots_lines: []const u32 = &.{},
     exclude_lines: []const u32 = &.{},
     arena: ?std.heap.ArenaAllocator = null,
 
-    /// Empty text, or a missing key, gives the defaults `roots = ["~"]`, `exclude = []`.
+    /// Empty text, or a missing key, gives the defaults `roots = ["~"]`, `exclude = []`,
+    /// `metrics = false`.
     pub fn parse(gpa: Allocator, text: []const u8, diag: *Diag) !Config {
         var arena: std.heap.ArenaAllocator = .init(gpa);
         errdefer arena.deinit();
         var p: Parser = .{ .a = arena.allocator(), .src = text, .diag = diag };
         try p.run();
-        var cfg: Config = .{ .roots = &default_roots, .exclude = &.{} };
+        var cfg: Config = .{ .roots = &default_roots, .exclude = &.{}, .metrics = p.metrics };
         if (p.roots) |r| {
             cfg.roots = r.items.items;
             cfg.roots_lines = r.lines.items;
@@ -81,6 +84,9 @@ const Parser = struct {
     line: u32 = 1,
     roots: ?Parsed = null,
     exclude: ?Parsed = null,
+    metrics: bool = false,
+    /// 0: the key is not set.
+    metrics_line: u32 = 0,
 
     fn run(p: *Parser) !void {
         try p.checkUtf8();
@@ -144,22 +150,51 @@ const Parser = struct {
         }
     }
 
+    const Key = enum { roots, exclude, metrics };
+
     fn keyValue(p: *Parser) !void {
         const line = p.line;
         const key = try p.parseKey();
-        const slot: *?Parsed = if (std.mem.eql(u8, key, "roots")) &p.roots else if (std.mem.eql(u8, key, "exclude")) &p.exclude else return fail(p.diag, line, "unknown key {f}: only \"roots\" and \"exclude\" are allowed", .{q(key)});
-        if (slot.*) |first| return fail(p.diag, line, "duplicate key {f} (first set on line {d})", .{ q(key), first.key_line });
+        const k = std.meta.stringToEnum(Key, key) orelse
+            return fail(p.diag, line, "unknown key {f}: only \"roots\", \"exclude\" and \"metrics\" are allowed", .{q(key)});
+        const first: u32 = switch (k) {
+            .roots => if (p.roots) |r| r.key_line else 0,
+            .exclude => if (p.exclude) |e| e.key_line else 0,
+            .metrics => p.metrics_line,
+        };
+        if (first != 0) return fail(p.diag, line, "duplicate key {f} (first set on line {d})", .{ q(key), first });
         p.skipWs();
         if (p.peek() != '=') return fail(p.diag, line, "expected \"=\" after key {f}", .{q(key)});
         p.pos += 1;
         p.skipWs();
-        if (p.peek() != '[') return fail(p.diag, p.line, "{f} must be an array of strings, for example {s} = [\"...\"]", .{ q(key), key });
-        slot.* = .{ .key_line = line };
-        try p.array(&slot.*.?);
+        switch (k) {
+            .metrics => {
+                p.metrics = try p.boolean();
+                p.metrics_line = line;
+            },
+            .roots, .exclude => {
+                if (p.peek() != '[') return fail(p.diag, p.line, "{f} must be an array of strings, for example {s} = [\"...\"]", .{ q(key), key });
+                const slot = if (k == .roots) &p.roots else &p.exclude;
+                slot.* = .{ .key_line = line };
+                try p.array(&slot.*.?);
+            },
+        }
         p.skipWs();
         try p.skipComment();
         if (p.pos < p.src.len and !p.atNewline())
-            return fail(p.diag, p.line, "unexpected text after the array; put each key on its own line", .{});
+            return fail(p.diag, p.line, "unexpected text after the {s}; put each key on its own line", .{if (k == .metrics) "value" else "array"});
+    }
+
+    /// `true` or `false`, as TOML spells them.
+    fn boolean(p: *Parser) !bool {
+        const start = p.pos;
+        while (p.peek()) |b| : (p.pos += 1) {
+            if (!std.ascii.isAlphanumeric(b)) break;
+        }
+        const word = p.src[start..p.pos];
+        if (std.mem.eql(u8, word, "true")) return true;
+        if (std.mem.eql(u8, word, "false")) return false;
+        return fail(p.diag, p.line, "\"metrics\" must be true or false, for example metrics = true", .{});
     }
 
     fn parseKey(p: *Parser) ![]const u8 {
@@ -174,8 +209,8 @@ const Parser = struct {
             if (!std.ascii.isAlphanumeric(b) and b != '_' and b != '-') break;
         }
         if (p.pos == start) {
-            if (c == '[') return fail(p.diag, p.line, "tables ([section]) are not supported: write \"roots\" and \"exclude\" at the top level of the file", .{});
-            return fail(p.diag, p.line, "unexpected character {f} where a key (roots or exclude) was expected", .{q(p.src[p.pos..][0..1])});
+            if (c == '[') return fail(p.diag, p.line, "tables ([section]) are not supported: write the keys at the top level of the file", .{});
+            return fail(p.diag, p.line, "unexpected character {f} where a key (roots, exclude or metrics) was expected", .{q(p.src[p.pos..][0..1])});
         }
         const k = p.src[start..p.pos];
         p.skipWs();
@@ -473,6 +508,24 @@ test "invalid files" {
     try expectBad("exclude = [\"a\"]\rroots = []", 1, "after the array");
 }
 
+test "metrics: off by default, true or false only" {
+    var diag: Diag = .{};
+    for ([_][]const u8{ "", "metrics = false", "metrics=true", "roots = ['/a']\n\"metrics\" = true # c\r\nexclude = []" }, [_]bool{ false, false, true, true }) |text, want| {
+        var cfg = try Config.parse(testing.allocator, text, &diag);
+        defer cfg.deinit();
+        try testing.expectEqual(want, cfg.metrics);
+    }
+    try expectBad("metrics = 1", 1, "true or false");
+    try expectBad("metrics = \"true\"", 1, "true or false");
+    try expectBad("metrics = True", 1, "true or false");
+    try expectBad("metrics = truely", 1, "true or false");
+    try expectBad("metrics =", 1, "true or false");
+    try expectBad("metrics = [true]", 1, "true or false");
+    try expectBad("metrics = true false", 1, "after the value");
+    try expectBad("metrics = true\nmetrics = false", 2, "duplicate key \"metrics\" (first set on line 1)");
+    try expectBad("metrics true", 1, "\"=\"");
+}
+
 test "message survives the error and does not leak" {
     var diag: Diag = .{};
     try testing.expectError(error.BadConfig, Config.parse(testing.allocator, "x = 1", &diag));
@@ -596,9 +649,10 @@ test "fuzz parse: no crash, no leak" {
         \\exclude = [
         \\  "a\u00e9\n", 'b', # c
         \\]
+        \\metrics = true
         \\
     ;
-    const frag = [_][]const u8{ "\"", "'", "[", "]", ",", "\\", "=", "#", "\n", "\r\n", "\\u", "\\U0010FFFF", "\"\"\"", "roots", "exclude", "\xff", "\x00", "é", " " };
+    const frag = [_][]const u8{ "\"", "'", "[", "]", ",", "\\", "=", "#", "\n", "\r\n", "\\u", "\\U0010FFFF", "\"\"\"", "roots", "exclude", "metrics", "true", "\xff", "\x00", "é", " " };
     var buf: [256]u8 = undefined;
     for (0..20000) |i| {
         var n: usize = 0;

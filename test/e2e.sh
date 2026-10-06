@@ -304,6 +304,7 @@ CONF
     assert_str "check: the first line is ok" ok "$(head -1 "$OUT")"
     assert_grep "check: shows the resolved root" "root$TAB$TREE" "$OUT"
     assert_grep "check: shows the rule count" "rules${TAB}3" "$OUT"
+    assert_grep "check: metrics are off by default" "metrics${TAB}off" "$OUT"
     run ds check "$TREE/node_modules"
     assert_rc "check PATH: excluded folder" 1
     assert_grep "check PATH: names the rule and its line" 'rule "node_modules/" (line 4)' "$OUT"
@@ -785,6 +786,47 @@ CONF
     wait_for 30 status_is ok
 }
 
+# The metrics log exists only when the config asks for it. The key is followed while the daemon
+# runs, with no new scan; turning it off writes the open window and a stop line.
+mlog_has() { "$BIN" status >/dev/null 2>&1; grep -F -- "$1" "$MLOG" >/dev/null 2>&1; }  # a query wakes the loop
+test_daemon_metrics() {
+    MLOG=$DH/.cache/dirsized/metrics.log
+    if [ -e "$MLOG" ]; then bad "a metrics log exists without metrics = true"; else ok "no metrics log by default"; fi
+    write_config <<CONF
+roots = ["$TREE", "$LST"]
+metrics = true
+CONF
+    run "$BIN" check
+    assert_grep "check: shows metrics on" "metrics${TAB}on" "$OUT"
+    if wait_for 10 mlog_has '"ev":"start"'; then ok "metrics = true starts the log with a start line"; else
+        bad "no metrics log after 10 s"
+        return
+    fi
+    if status_is ok; then ok "turning the metrics on starts no scan"; else bad "state is not ok after metrics = true"; fi
+    "$BIN" "$LST" >/dev/null
+    "$BIN" -l "$LST" >/dev/null
+    write_config <<CONF
+roots = ["$TREE", "$LST"]
+CONF
+    if wait_for 10 mlog_has '"ev":"stop"'; then ok "metrics off ends the log with a stop line"; else bad "no stop line after 10 s"; fi
+    assert_grep "the open window is written as a sample" '"ev":"sample"' "$MLOG"
+    assert_grep "the sample has the state" '"state":"ok"' "$MLOG"
+    # Two greps: a minute sample between the two requests puts them in different lines.
+    assert_grep "the sample counts the size request" '"size":1,' "$MLOG"
+    assert_grep "the sample counts the list request" '"list":1,' "$MLOG"
+    assert_grep "the slowest requests have their own lines" '"ev":"request"' "$MLOG"
+    if command -v python3 >/dev/null 2>&1; then
+        if python3 -c 'import json,sys
+for l in open(sys.argv[1]): json.loads(l)["ev"]' "$MLOG" 2>"$ERR"; then ok "every line of the metrics log is JSON"; else
+            bad "the metrics log has a line that is not JSON"
+            sed 's/^/    /' "$ERR"
+        fi
+    fi
+    size=$(stat $STATFMT "$MLOG")
+    "$BIN" "$LST" >/dev/null
+    assert_str "nothing is written after metrics are off" "$size" "$(stat $STATFMT "$MLOG")"
+}
+
 test_daemon_stop() {
     kill -TERM "$DPID"
     wait "$DPID"
@@ -822,6 +864,7 @@ test_daemon() {
     test_daemon_restart
     test_denied_restart
     test_daemon_config
+    test_daemon_metrics
     test_daemon_stop
 }
 

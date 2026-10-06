@@ -111,6 +111,51 @@ dirsized check ~/prog/app    # is this folder counted? which rule decides?
 
 A bad file does not stop the daemon. `dirsized status` shows the error.
 
+## Metrics
+
+Is the daemon healthy on your computer? Is it fast? What does it cost? Turn the metrics on to see:
+
+```toml
+metrics = true
+```
+
+The metrics are off by default. With this line, the daemon writes to `~/.cache/dirsized/metrics.log` one time each minute.
+The file stays on your computer. The daemon sends nothing.
+
+```json
+{"t":"2026-10-06T12:39:59Z","ev":"sample","window_s":60,"state":"ok","cpu_pct":0.01,"rss":20971520,"requests":42,"req_p99_ns":16383,"loop_max_ns":370000, ...}
+{"t":"2026-10-06T12:39:59Z","ev":"request","ns":31000,"verb":"list","out_bytes":2903,"path":"/Users/me/prog"}
+{"t":"2026-10-06T12:39:59Z","ev":"read","ns":395000,"path":"/Users/me/prog/app/target"}
+```
+
+Each line is one JSON object. Each time is in nanoseconds (`_ns`). Each size is in bytes.
+
+| Line | When | What it tells you |
+|---|---|---|
+| `sample` | Each minute | Health: `state`, `watching`, `config_ok`, `queued`. Cost: `cpu_pct`, `rss`, `rss_max`. Speed: `req_p50_ns`, `req_p99_ns`, `req_max_ns`, `loop_max_ns`. Work: `requests`, `events`, `reads`. |
+| `request` | With each sample | The 3 slowest requests of that minute, with the path. |
+| `read` | With each sample | The 3 slowest folder reads of that minute, with the path. |
+| `start`, `stop` | When the metrics start and stop | The version and the pid. |
+
+```sh
+jq -c 'select(.ev=="sample") | {t, state, cpu_pct, rss, req_p99_ns, loop_max_ns}' ~/.cache/dirsized/metrics.log
+jq -s 'map(select(.ev=="request")) | sort_by(.ns) | .[-5:]' ~/.cache/dirsized/metrics.log   # the 5 slowest requests
+```
+
+Or ask an AI agent to read the file:
+
+```
+Read ~/.cache/dirsized/metrics.log. The keys are in docs/DESIGN.md section 13.6. Is the daemon healthy and fast?
+```
+
+- A minute with no `sample` line means that the daemon did not run, or that it was stuck.
+- The file contains folder paths. Look at it before you share it.
+- At 4 MiB the file becomes `metrics.log.1` and a new file starts. Thus the two files use at most 8 MiB.
+- The cost: the daemon wakes up one time each minute, and each request reads the clock two times.
+- On Linux the daemon sees its own writes to the log as changes. To prevent that, exclude the cache folder: `exclude = ["/.cache/dirsized/"]`. On macOS this is not necessary.
+
+[docs/DESIGN.md](docs/DESIGN.md) section 13.6 explains each key.
+
 ## Emacs
 
 Dired shows the real size of every folder. Emacs never waits. It needs Emacs 28.1 or later.
@@ -145,13 +190,14 @@ More in [emacs/README.md](emacs/README.md).
 | Socket | `~/.cache/dirsized/sock` (Linux: `$XDG_RUNTIME_DIR/dirsized/sock`) |
 | Snapshot | `~/.cache/dirsized/table` (Linux: `$XDG_CACHE_HOME` replaces `~/.cache`) |
 | Log | `~/.cache/dirsized/log` (Linux: `journalctl --user -u dirsized`) |
+| Metrics log (only with `metrics = true`) | `~/.cache/dirsized/metrics.log`, `metrics.log.1` |
 | Service | macOS: `~/Library/LaunchAgents/local.dirsized.plist`. Linux: `~/.config/systemd/user/dirsized.service` |
 | Signing key (macOS) | `~/.config/dirsized/signing.keychain-db` |
 
 ## Uninstall
 
 ```sh
-make uninstall             # stops the service; removes the binary, the service file, the socket, the snapshot and the log
+make uninstall             # stops the service; removes the binary, the service file, the socket, the snapshot and the logs
 make uninstall PURGE=1     # also removes ~/.config/dirsized: the config file and the signing key
 ```
 

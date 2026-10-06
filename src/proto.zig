@@ -29,6 +29,28 @@ pub const ErrorCode = enum {
     }
 };
 
+/// JSON allows any code point but needs `"`, `\` and controls escaped. A byte that is not
+/// part of valid UTF-8 becomes `\u00XX`, so the output is always valid JSON (a real U+00XX
+/// looks the same; use -0 when exact bytes matter).
+pub fn writeJsonString(w: *Writer, s: []const u8) Writer.Error!void {
+    try w.writeByte('"');
+    var i: usize = 0;
+    while (i < s.len) {
+        const b = s[i];
+        const len: usize = std.unicode.utf8ByteSequenceLength(b) catch 0;
+        if (len > 1 and i + len <= s.len and std.unicode.utf8ValidateSlice(s[i..][0..len])) {
+            try w.writeAll(s[i..][0..len]);
+            i += len;
+            continue;
+        }
+        i += 1;
+        if (b == '"' or b == '\\') try w.writeAll(&.{ '\\', b }) //
+        else if (b < 0x20 or b >= 0x7f) try w.print("\\u{x:0>4}", .{b}) //
+        else try w.writeByte(b);
+    }
+    try w.writeByte('"');
+}
+
 // ---------------------------------------------------------------- server side
 
 /// One request, without its NUL. `status` takes no path. `size` and `list` need an absolute

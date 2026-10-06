@@ -18,4 +18,5 @@ test {
     _ = @import("server.zig");
     _ = @import("daemon.zig");
     _ = @import("snapshot.zig");
+    _ = @import("metrics.zig");
 }

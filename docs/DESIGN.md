@@ -53,7 +53,7 @@ Zig has two costs:
 - Zig is not at version 1.0, and a new version can change the language. Thus the project uses one fixed version: 0.16.0.
 - The standard library of Zig has no TOML parser. The project has its own small parser.
 
-The parser reads only what the configuration file needs: comments, two keys, and arrays of strings.
+The parser reads only what the configuration file needs: comments, three keys, arrays of strings, and `true` or `false`.
 It reads each correct TOML form of these items. It gives an error for all other content.
 
 The build uses the `ReleaseSafe` mode. In this mode, the binary stops when an index is out of range.
@@ -467,7 +467,7 @@ Thus the target of 1 millisecond is for a client with an open connection, not fo
 ### 13.1 The file
 
 The location is `~/.config/dirsized/config.toml` on macOS and on Linux.
-The file has two keys. The daemon works with an empty file or with no file.
+The file has three keys. The daemon works with an empty file or with no file.
 
 ```toml
 # Folders that the daemon monitors. "~" is the home folder.
@@ -481,6 +481,9 @@ exclude = [
   "target/",
   "!/prog/app/target/",  # exception: count this folder
 ]
+
+# Write the metrics log (section 13.6). The default is false.
+metrics = false
 ```
 
 ### 13.2 Rules for the roots
@@ -524,11 +527,79 @@ If the file changed, the daemon does these steps:
 
 An error in the file cannot stop the daemon and cannot erase the table.
 
+The key `metrics` is not in the hash. A change of this key starts or stops the metrics log and does not start a scan.
+
 ### 13.5 Procedure for an agent
 
 1. Change `~/.config/dirsized/config.toml`.
 2. Do `dirsized check`. The exit code 0 shows that the file is correct.
 3. Do `dirsized check <path>` for a path that must change.
+
+### 13.6 Metrics
+
+The metrics answer these questions: Is the daemon healthy? Is it fast? Which requests and which folders are the heaviest? How much processor time and memory does the daemon use?
+
+The metrics are off by default. The line `metrics = true` in the configuration file turns them on. The daemon obeys a change of the line while it runs.
+`dirsized check` shows `metrics on` or `metrics off`.
+
+The daemon appends to the file `metrics.log` in the cache folder (`~/.cache/dirsized/metrics.log`). The mode of the file is 0600. The daemon sends nothing to a different computer.
+
+- Each line is one JSON object. The first two keys are `t` (the time in UTC) and `ev` (the type of the line).
+- Each duration is in nanoseconds and its key ends with `_ns`. Each size is in bytes. The other numbers are counts.
+- The daemon writes a `sample` line each 60 seconds. It also writes one when the metrics stop and when the daemon stops.
+  If a minute has no `sample` line, the daemon did not run or was stuck.
+- After each `sample` line come the 3 slowest requests (`request`) and the 3 slowest folder reads (`read`) of that window, slowest first.
+- When the file would become larger than 4 MiB, the daemon renames it to `metrics.log.1` and starts a new file. An older `metrics.log.1` is replaced.
+  If the rename is not possible, the daemon empties the file and continues. You can empty or delete the file at any time.
+- If the file has an error in a root or in a pattern, the daemon keeps the previous roots and patterns but obeys the `metrics` line. If the file cannot be parsed, the metrics stay as they were (off, at a start).
+
+| Line | Keys |
+|---|---|
+| `start` | `version`, `pid`, `os`, `interval_s` |
+| `sample` | See the table below. |
+| `request` | `ns` (time in the handler), `verb` (`size`, `list`, or `status`), `out_bytes` (size of the answer), `path` |
+| `read` | `ns` (time that a worker used to read the folder), `path` |
+| `stop` | No more keys. |
+
+The keys of a `sample` line:
+
+| Key | Meaning |
+|---|---|
+| `window_s` | Seconds since the previous sample (or since the start). The counts below are for this window. |
+| `uptime_s` | Seconds since the daemon started. |
+| `state` | The state that `status` shows: `ok`, `scanning`, `stale`, or `partial`. |
+| `watching` | `false` if the watcher could not start. |
+| `config_ok` | `false` while a configuration error is set. |
+| `cpu_pct` | Processor time of the full process (all threads) as a percentage of the window. 100 is one core that is always busy. |
+| `cpu_user_ns`, `cpu_sys_ns` | The same processor time, user and system. |
+| `rss` | Resident memory of the process now. |
+| `rss_max` | The largest resident memory since the process started. |
+| `table` | Bytes of the folder table. |
+| `folders` | Number of folders in the table. |
+| `requests` | Number of answered requests. `size`, `list`, and `status` are the counts for each verb. |
+| `req_p50_ns`, `req_p99_ns` | Half of the requests, and 99 % of them, took no longer than this. These values come from buckets of powers of two, thus they can be too high by a factor of up to 2. |
+| `req_max_ns` | The slowest request. This value is accurate. |
+| `out_bytes` | Bytes of all answers. |
+| `events` | Change events from the watcher. |
+| `reads` | Folders that the scanner read. `read_ns` is the sum of the read times of the workers. `read_max_ns` is the slowest read. |
+| `queued` | Folders that wait for a read now. |
+| `clients` | Open client connections now. |
+| `wakeups` | Number of times that the main loop woke up. |
+| `busy_ns` | Time that the main loop worked between wake-up and sleep. |
+| `loop_max_ns` | The longest single turn of the main loop. A request that arrives during a turn waits until the turn ends. Thus this value is the largest delay that the daemon added to a request. |
+
+A request time is the time in the handler only: the table lookup and the write into the output buffer. It does not include the socket and the client.
+On macOS the clock has a resolution of 1 microsecond.
+
+What the metrics cost:
+
+- Memory: a fixed block of less than 32 KB. The metrics do not allocate.
+- Each request reads the clock two times.
+- The main loop wakes up one time each minute. Without the metrics, an idle daemon has no wake-ups.
+- The log is in the cache folder, and the cache folder is in a root if the root is `~`. The daemon thus watches the file that it writes.
+  - macOS: this has no effect. The daemon keeps the file open, and macOS sends no event for a file that stays open (section 8). This was measured: 0 events and 0 reads in an idle minute.
+  - Linux: each write to the log is one change event and one folder read, and that read changes a total. Thus the daemon also saves the snapshot each 5 minutes. This follows from how `inotify` works; it was not measured.
+  - To prevent this, exclude the cache folder in the configuration file: `exclude = ["/.cache/dirsized/"]` (for the root `~`). The folder then has the state `excluded`, and its size is not in the total of its parents.
 
 ## 14. Targets and results
 
@@ -680,8 +751,8 @@ A system without `systemd` can start the daemon with the command `dirsized daemo
 
 ### 16.0 What exists now
 
-- Unit tests: `zig build test` runs them. On macOS, 170 tests pass.
-- `test/e2e.sh`: 205 checks on macOS. The checks on Linux in Docker are 199 for each image.
+- Unit tests: `zig build test` runs them. On macOS, 176 tests pass.
+- `test/e2e.sh`: 218 checks on macOS. The checks on Linux in Docker are 211 for each image.
 - `test/linux-unit.sh`: builds the unit tests of `scan_linux.zig` and `watch_linux.zig` for Linux and runs them in a clean container as a non-root user. 115 tests pass.
 - `test/docker.sh`: runs `test/e2e.sh` as a non-root user (uid 1000, all capabilities dropped, `no-new-privileges`) on Debian, Fedora, and Alpine. 0 checks failed on each image.
 - `emacs/dirsized-tests.el`: 33 tests. One of them runs against the real daemon. The others use a fake server. `make test-emacs` runs them.

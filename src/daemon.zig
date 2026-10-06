@@ -11,6 +11,8 @@
 //!
 //! Timers are armed only when there is something to wait for (a debounce, a snapshot of a
 //! changed table, the verification), so an idle daemon sleeps in `poll` with no wake-ups.
+//! The one exception is asked for in the config: with `metrics = true` the loop wakes up once a
+//! minute to write a sample (metrics.zig).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -19,6 +21,7 @@ const Writer = std.Io.Writer;
 const c = std.c;
 const config = @import("config.zig");
 const ignore = @import("ignore.zig");
+const metrics_mod = @import("metrics.zig");
 const paths = @import("paths.zig");
 const proto = @import("proto.zig");
 const scan = @import("scan.zig");
@@ -303,6 +306,8 @@ const Spec = struct {
     roots: [][]u8,
     rules: ignore.Rules,
     hash: u64,
+    /// Not in the hash: turning the metrics on or off is no reason to scan again.
+    metrics: bool = false,
 
     fn deinit(s: *Spec, gpa: Allocator) void {
         for (s.roots) |r| gpa.free(r);
@@ -525,11 +530,12 @@ const Daemon = struct {
     next_config_check: i64 = 0,
     config_error: ?[]u8 = null,
 
+    metrics: metrics_mod.Metrics = .{},
+
     // ---- start and stop
 
     fn start(d: *Daemon) void {
-        d.started = nowNs();
-        d.now = d.started;
+        d.now = nowNs(); // `started` is set by `initDaemon`, before the snapshot is loaded
         d.next_config_check = d.now + config_check_ns;
         d.save_at = d.now + save_every_ns;
         d.scanner.on_applied = .{ .ctx = d, .func = onApplied };
@@ -561,6 +567,10 @@ const Daemon = struct {
         // snapshot write is an event in ~/.cache) must not schedule the next save.
         if (changed) d.changed += 1;
         d.slow.record(table, id, d.scanner.last_read_ns, nowNs());
+        if (d.metrics.on() and d.metrics.read(d.scanner.last_read_ns)) {
+            d.scratch.clearRetainingCapacity();
+            if (table.pathOf(id, &d.scratch, d.gpa)) |_| d.metrics.slowRead(d.scanner.last_read_ns, d.scratch.items) else |_| {}
+        }
         // Binds the watch the worker added to the node.
         if (is_linux) d.watcher.onApplied(table, id, read);
     }
@@ -682,7 +692,10 @@ const Daemon = struct {
 
     // ---- config
 
-    const SpecResult = union(enum) { ok: Spec, bad: []u8 };
+    /// `metrics` is what the file says when it could be parsed (a bad root or pattern comes later):
+    /// the metrics follow the file also then, because a daemon with a config error is one to look at.
+    const Bad = struct { msg: []u8, metrics: ?bool = null };
+    const SpecResult = union(enum) { ok: Spec, bad: Bad };
 
     /// Reads and checks the config file. `bad` holds the message (allocated with `gpa`).
     fn readSpec(d: *Daemon) Allocator.Error!SpecResult {
@@ -691,27 +704,27 @@ const Daemon = struct {
         const text = std.Io.Dir.cwd().readFileAlloc(d.io, cfg_path, gpa, .limited(1 << 20)) catch |e| switch (e) {
             error.FileNotFound => try gpa.dupe(u8, ""),
             error.OutOfMemory => return error.OutOfMemory,
-            else => return .{ .bad = try std.fmt.allocPrint(gpa, "cannot read {s}: {t}", .{ cfg_path, e }) },
+            else => return .{ .bad = .{ .msg = try std.fmt.allocPrint(gpa, "cannot read {s}: {t}", .{ cfg_path, e }) } },
         };
         defer gpa.free(text);
         var diag: config.Diag = .{};
         var cfg = config.Config.parse(gpa, text, &diag) catch |e| switch (e) {
-            error.BadConfig => return .{ .bad = try badMessage(gpa, cfg_path, diag) },
+            error.BadConfig => return .{ .bad = .{ .msg = try badMessage(gpa, cfg_path, diag) } },
             else => |oom| return oom,
         };
         defer cfg.deinit();
         var rules = config.compileRules(gpa, &cfg, &diag) catch |e| switch (e) {
-            error.BadConfig => return .{ .bad = try badMessage(gpa, cfg_path, diag) },
+            error.BadConfig => return .{ .bad = .{ .msg = try badMessage(gpa, cfg_path, diag), .metrics = cfg.metrics } },
             else => |oom| return oom,
         };
         const roots = config.resolveRoots(gpa, &cfg, d.home, &diag) catch |e| {
             rules.deinit(gpa);
             switch (e) {
-                error.BadConfig => return .{ .bad = try badMessage(gpa, cfg_path, diag) },
+                error.BadConfig => return .{ .bad = .{ .msg = try badMessage(gpa, cfg_path, diag), .metrics = cfg.metrics } },
                 else => |oom| return oom,
             }
         };
-        return .{ .ok = .{ .roots = roots, .rules = rules, .hash = specHash(roots, cfg.exclude) } };
+        return .{ .ok = .{ .roots = roots, .rules = rules, .hash = specHash(roots, cfg.exclude), .metrics = cfg.metrics } };
     }
 
     fn badMessage(gpa: Allocator, path: []const u8, diag: config.Diag) Allocator.Error![]u8 {
@@ -743,7 +756,7 @@ const Daemon = struct {
         };
         if (!std.meta.eql(Stamp.of(d.io, d.config_path), stamp)) {
             switch (spec) {
-                .bad => |msg| d.gpa.free(msg),
+                .bad => |b| d.gpa.free(b.msg),
                 .ok => |s| {
                     var sp = s;
                     sp.deinit(d.gpa);
@@ -754,25 +767,29 @@ const Daemon = struct {
         const old_stamp = d.config_stamp;
         d.config_stamp = stamp;
         switch (spec) {
-            .bad => |msg| {
-                if (d.config_error) |old| if (std.mem.eql(u8, old, msg)) {
-                    d.gpa.free(msg); // the same problem again: nothing new to say
+            .bad => |b| {
+                if (b.metrics) |m| d.setMetrics(m);
+                if (d.config_error) |old| if (std.mem.eql(u8, old, b.msg)) {
+                    d.gpa.free(b.msg); // the same problem again: nothing new to say
                     return;
                 };
-                log("config error, keeping the previous config: {s}", .{msg});
-                d.setConfigError(msg);
+                log("config error, keeping the previous config: {s}", .{b.msg});
+                d.setConfigError(b.msg);
             },
             .ok => |s| {
                 d.setConfigError(null);
+                const want_metrics = s.metrics;
                 if (s.hash == d.live.hash) {
                     var sp = s;
                     sp.deinit(d.gpa);
+                    d.setMetrics(want_metrics);
                     return;
                 }
-                d.switchGeneration(s) catch |e| {
+                // The metrics follow only a config that was applied.
+                if (d.switchGeneration(s)) |_| d.setMetrics(want_metrics) else |e| {
                     log("cannot start the new config ({t}); keeping the previous one", .{e});
                     d.config_stamp = old_stamp;
-                };
+                }
             },
         }
     }
@@ -801,6 +818,7 @@ const Daemon = struct {
             fds[1] = .{ .fd = if (d.now < d.watch_hold) -1 else d.watcher.pollFd(), .events = c.POLL.IN, .revents = 0 };
             const rc = c.poll(&fds, @intCast(2 + n), d.pollTimeout());
             d.now = nowNs();
+            const woke = d.now; // `tick` moves `d.now`
             if (rc < 0) {
                 if (c.errno(rc) != .INTR) log("poll failed: {t}", .{c.errno(rc)});
                 continue;
@@ -811,6 +829,15 @@ const Daemon = struct {
             if (rc == 0 or fds[0].revents != 0 or fds[1].revents != 0 or d.timerDue()) {
                 if (fds[0].revents != 0) d.drainWakePipe();
                 d.tick();
+            }
+            if (d.metrics.on()) {
+                var end = nowNs();
+                // The sample is work of this turn too: its time goes into the window it opens.
+                if (end >= d.metrics.sample_at) {
+                    d.sampleMetrics(end);
+                    end = nowNs();
+                }
+                d.metrics.loopTurn(@intCast(end - woke));
             }
         }
     }
@@ -840,6 +867,7 @@ const Daemon = struct {
         if (d.config_error != null) arm(&next, d.next_config_check);
         if (d.now < d.watch_hold) arm(&next, d.watch_hold);
         if (d.server.accept_resume) |t| arm(&next, t);
+        if (d.metrics.on()) arm(&next, d.metrics.sample_at);
         return next;
     }
 
@@ -982,6 +1010,35 @@ const Daemon = struct {
         if (announce) log("saved the snapshot: {d} folders, {d} bytes, {d} ms", .{ d.live.table.count(), size, @divTrunc(nowNs() - t0, 1_000_000) });
     }
 
+    // ---- metrics
+
+    /// Follows the `metrics` key of the config. Turning them off writes the open window first.
+    fn setMetrics(d: *Daemon, want: bool) void {
+        if (want == d.metrics.on()) return;
+        if (want) {
+            if (!d.metrics.enable(d.now, version, d.events)) log("cannot open the metrics log; metrics stay off", .{});
+        } else {
+            d.sampleMetrics(nowNs());
+            d.metrics.disable();
+        }
+    }
+
+    fn sampleMetrics(d: *Daemon, now: i64) void {
+        const g = d.serving;
+        d.metrics.sample(now, .{
+            .uptime_ns = now - d.started,
+            .state = d.state(),
+            .watching = d.watching,
+            .config_ok = d.config_error == null,
+            .folders = g.table.count(),
+            .table_bytes = g.table.memoryBytes(),
+            .rss = residentBytes(),
+            .queued = d.queued(),
+            .clients = d.server.clients.items.len,
+            .events = d.events,
+        });
+    }
+
     // ---- changes
 
     /// Called by the watcher for each change (never fails: an allocation problem sets `recover`).
@@ -1109,6 +1166,14 @@ const Daemon = struct {
 
     /// Called by the server for each request. The `size` path is a table lookup and one write.
     pub fn handle(d: *Daemon, req: proto.Request, out: *Writer) Writer.Error!void {
+        if (!d.metrics.on()) return d.answer(req, out);
+        const t0 = nowNs();
+        const before = out.end;
+        try d.answer(req, out);
+        d.metrics.request(req.verb, req.path, @intCast(nowNs() - t0), out.end - before);
+    }
+
+    fn answer(d: *Daemon, req: proto.Request, out: *Writer) Writer.Error!void {
         // Reading the file and switching generations can take long: not in a query.
         if (d.now >= d.next_config_check) d.wake();
         const g = d.serving;
@@ -1136,7 +1201,8 @@ const Daemon = struct {
         }
     }
 
-    fn status(d: *Daemon, out: *Writer) Writer.Error!void {
+    /// The state of the daemon as a whole, as `status` shows it.
+    fn state(d: *const Daemon) proto.State {
         const g = d.serving;
         var worst: table_mod.State = .ok;
         for (g.table.roots()) |r| switch (g.table.state(r.node)) {
@@ -1148,15 +1214,25 @@ const Daemon = struct {
         };
         // A bad config (or none that works, so no roots) is not "ok", whatever the table says.
         if (d.config_error != null and worst == .ok) worst = .partial;
+        return decide(.{ .node = worst }, d.isStale());
+    }
+
+    /// Folders that wait for a read: in the scanner or behind the debounce.
+    fn queued(d: *const Daemon) usize {
+        return d.scanner.stack.items.len + d.scanner.in_flight + d.dirty.items.len;
+    }
+
+    fn status(d: *Daemon, out: *Writer) Writer.Error!void {
+        const g = d.serving;
         d.scratch.clearRetainingCapacity();
         d.collectDenied(g);
         try writeStatus(out, .{
             .pid = c.getpid(),
-            .state = decide(.{ .node = worst }, d.isStale()),
+            .state = d.state(),
             .folders = g.table.count(),
             .memory = g.table.memoryBytes(),
             .rss = residentBytes(),
-            .queued = d.scanner.stack.items.len + d.scanner.in_flight + d.dirty.items.len,
+            .queued = d.queued(),
             .slow = d.slowCount(),
             .events = d.events,
             .snapshot_age = ageOf(d.now, d.last_save),
@@ -1280,6 +1356,7 @@ pub fn run(init: std.process.Init) !u8 {
     d.server.removeSocketFile(); // clients see "no daemon" while the rest is torn down
     // Also without a change: the watcher checkpoint may have moved.
     if (d.changed != d.saved_changed or !d.initial_scan) d.save(true);
+    d.setMetrics(false); // the last sample and the `stop` line
     d.deinit();
     return 0;
 }
@@ -1325,16 +1402,23 @@ fn initDaemon(d: *Daemon, gpa: Allocator, io: std.Io, home: []const u8, p: *cons
         .serving = undefined,
     };
     d.config_stamp = Stamp.of(d.io, d.config_path);
+    d.started = nowNs();
+    d.now = d.started;
+    d.metrics.setPath(p.metrics) catch {}; // too long: `enable` fails and says so
     const spec: Spec = switch (try d.readSpec()) {
         .ok => |s| s,
-        .bad => |msg| blk: {
-            log("config error: {s}", .{msg});
-            d.config_error = msg;
-            break :blk try emptySpec(gpa);
+        .bad => |b| blk: {
+            log("config error: {s}", .{b.msg});
+            d.config_error = b.msg;
+            var empty = try emptySpec(gpa);
+            empty.metrics = b.metrics orelse false;
+            break :blk empty;
         },
     };
+    const want_metrics = spec.metrics;
     d.live = try Generation.create(gpa, spec, null);
     d.serving = d.live;
+    d.setMetrics(want_metrics);
     d.loadSnapshot();
 }
 

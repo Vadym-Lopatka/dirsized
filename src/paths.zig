@@ -11,6 +11,7 @@ pub const Paths = struct {
     socket: []const u8,
     snapshot: []const u8,
     lock: []const u8,
+    metrics: []const u8,
 
     /// Everything is allocated from `arena`; free it all at once.
     /// error.SocketPathTooLong if the socket path does not fit in `sockaddr_un.sun_path`.
@@ -45,6 +46,7 @@ fn layoutFor(os: std.Target.Os.Tag, arena: Allocator, home: []const u8, xdg_runt
         .socket = sock,
         .snapshot = try std.fs.path.join(arena, &.{ cache, "table" }),
         .lock = try std.fs.path.join(arena, &.{ cache, "lock" }),
+        .metrics = try std.fs.path.join(arena, &.{ cache, "metrics.log" }),
     };
 }
 
@@ -144,6 +146,7 @@ test "macOS layout ignores the XDG variables" {
     try testing.expectEqualStrings("/Users/x/.cache/dirsized/sock", p.socket);
     try testing.expectEqualStrings("/Users/x/.cache/dirsized/table", p.snapshot);
     try testing.expectEqualStrings("/Users/x/.cache/dirsized/lock", p.lock);
+    try testing.expectEqualStrings("/Users/x/.cache/dirsized/metrics.log", p.metrics);
 }
 
 test "Linux layout" {
