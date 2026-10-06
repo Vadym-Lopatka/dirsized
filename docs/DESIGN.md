@@ -184,6 +184,7 @@ The daemon scans the moved folder again. This is slower than a direct move of th
 ### Errors during a read
 
 - The daemon cannot read a folder because of a permission: the folder gets the flag `denied`. It keeps its last value and its child nodes.
+  The daemon reads the folder again when an event arrives for it, at each start, and at the verification scan. A read that succeeds clears the flag.
 - An item in a folder that the daemon cannot inspect, or a record that the system gives in a wrong form, has the same result. The item can be a folder.
   Thus the daemon does not trust the list of child folders, and the folder gets the state `partial`.
 - A folder is not found, or is not a folder any more: the daemon reads the parent again. The read of the parent removes the child node.
@@ -268,6 +269,7 @@ FSEvents keeps the event history on the disk. Each event has an ID.
 The snapshot file contains the ID of the last event that the daemon applied (the checkpoint).
 On a quiet disk no event moves the ID. Then the daemon takes the current event ID after a flush of the streams (`FSEventStreamFlushSync`), if no event waits.
 After a restart, the daemon gets all the events from that ID and applies the update rule.
+At each start, the daemon also reads each denied folder again. A permission can change while the daemon is off, and FSEvents does not always report that change.
 The replayed event IDs are not in order. The daemon keeps the maximum ID.
 The replay is complete when FSEvents sends the `HistoryDone` flag. Until then, the generation is `stale`.
 
@@ -338,7 +340,7 @@ A long hold could fill the kernel queue (16 384 events) and cause `IN_Q_OVERFLOW
 ### Restart
 
 `inotify` has no event history, and the daemon must add all the watches again.
-Thus the daemon reads each folder again after each restart. The snapshot file has an empty watcher blob.
+Thus the daemon reads each folder again after each restart. This includes each denied folder. The snapshot file has an empty watcher blob.
 During that scan, the server gives the values from the snapshot file with the state `stale`.
 
 ### Not included
@@ -661,8 +663,8 @@ A system without `systemd` can start the daemon with the command `dirsized daemo
 
 ### 16.0 What exists now
 
-- Unit tests: `zig build test` runs them. On macOS, 168 tests pass.
-- `test/e2e.sh`: 197 checks on macOS. The checks on Linux in Docker are 191 for each image.
+- Unit tests: `zig build test` runs them. On macOS, 169 tests pass.
+- `test/e2e.sh`: 199 checks on macOS. The checks on Linux in Docker are 193 for each image.
 - `test/linux-unit.sh`: builds the unit tests of `scan_linux.zig` and `watch_linux.zig` for Linux and runs them in a clean container as a non-root user. 115 tests pass.
 - `test/docker.sh`: runs `test/e2e.sh` as a non-root user (uid 1000, all capabilities dropped, `no-new-privileges`) on Debian, Fedora, and Alpine. 0 checks failed on each image.
 - `emacs/dirsized-tests.el`: 33 tests. One of them runs against the real daemon. The others use a fake server. `make test-emacs` runs them.

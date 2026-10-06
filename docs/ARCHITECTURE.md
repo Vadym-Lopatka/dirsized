@@ -321,7 +321,7 @@ pub const State = enum { ok, scanning, partial };     // `stale` is decided by t
 ```
 
 - `pending`: the content is unknown (new folder). Gives `scanning` to the node and all ancestors.
-- `recheck`: a re-read is owed, but the value is believed current (event, verification, restart).
+- `recheck`: a re-read is owed, but the value is believed current (event, verification, restart, or a `denied` folder at start).
   It has **no effect on the state** and no entry in the `below` map. So a busy disk does not make
   every answer `scanning`.
 - `markRecheck(id) bool`: sets the bit, returns true if it was clear. No allocation.
@@ -447,7 +447,7 @@ read buffer (`Watcher.saturated`): more events wait, and a hold could overflow t
   becomes idle, `serving` is freed and replaced. Before a switch: `scanner.discard()`, `watcher.stop()`.
 - **Start**: lock file (`flock`, a second daemon exits 2) -> config -> snapshot (if its config
   hash matches) -> `watcher.start` **before any read** -> no snapshot: roots are `pending`;
-  snapshot + `.fresh`: every node gets `recheck`; snapshot + `.resumed`: nothing. With a snapshot
+  snapshot + `.fresh`: every node gets `recheck`; snapshot + `.resumed`: only the folders flagged at save time and each `denied` folder (`recheckDenied`: `markOne`, as for an event; if the read fails again, the folder stays `denied`). With a snapshot
   the generation is `stale` until `watcher.caughtUp()` and the scanner is idle.
 - **Change handling**: drop if `rules.explain(rel)` excludes the path. `lookupDeepest`; set
   `recheck` on that node (for `subtree`: on every node below it). Newly flagged ids go to `dirty`.

@@ -658,6 +658,25 @@ test_daemon_restart() {
     rm -f "$SNAP.cut"
 }
 
+# A folder that was denied is read again at the next start, with no event for it. Needs a
+# restart from the snapshot and a chmod that a stopped daemon does not see as an event.
+test_denied_restart() {
+    [ "$(id -u)" = 0 ] && return
+    mkdir -p "$T/dre/locked"
+    file "$T/dre/locked/f" 50
+    chmod 000 "$T/dre/locked"
+    write_config <<CONF
+roots = ["$TREE", "$LST", "$T/dre"]
+CONF
+    wait_for 30 status_has "denied: $T/dre/locked"
+    stop_daemon
+    chmod 755 "$T/dre/locked"
+    start_daemon
+    wait_for 10 status_has "snapshot_age"
+    if wait_for 30 status_lacks "denied: $T/dre/locked"; then ok "a folder that became readable while the daemon was down is not denied after the start"; else bad "the folder is still denied after the restart"; fi
+    assert_grep "the daemon started from the snapshot" "from the snapshot" "$T/daemon.log"
+}
+
 test_daemon_config() {
     mkdir -p "$TREE/node_modules/inner"
     sleep 1.5   # let the folder reach the table before the rule hides it
@@ -791,6 +810,7 @@ test_daemon() {
         test_daemon_changes
     fi
     test_daemon_restart
+    test_denied_restart
     test_daemon_config
     test_daemon_stop
 }

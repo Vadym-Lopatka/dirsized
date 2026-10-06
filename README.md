@@ -115,7 +115,7 @@ More in [emacs/README.md](emacs/README.md).
 - Sizes are file lengths, as `ls -l` shows. They are not disk blocks, so the number can differ from `du`. Hard links count in each folder. Symbolic links and other volumes are skipped.
 - Until the first scan ends, answers have the state `scanning`.
 - macOS sends no event while a program keeps a file open. The size grows when the program closes the file.
-- macOS protects some folders (for example `~/Library/Mail`). They get the state `partial`, and `status` lists them. Give Full Disk Access to the binary to count them.
+- macOS protects some folders (for example `~/Library/Mail`). They get the state `partial`, and `status` lists them. Give Full Disk Access to the binary to count them. Then restart the daemon (macOS: `launchctl kickstart -k gui/$(id -u)/local.dirsized`). It reads these folders again at each start.
 - Linux uses one inotify watch for each folder. If `status` shows that `watches` reaches `watch_limit`, raise it: `sudo sysctl fs.inotify.max_user_watches=1048576`.
 - Linux is tested in Docker (Debian, Fedora, Alpine). The `systemd` service and btrfs subvolumes are not yet tested on a real computer. Reports are welcome.
 

@@ -596,7 +596,10 @@ const Daemon = struct {
                 d.verifying = true;
                 d.scanner.setLowPriority(true);
                 d.markAll();
-            } else d.recoverLost();
+            } else {
+                d.recoverLost();
+                d.recheckDenied();
+            }
         } else {
             d.initial_scan = true;
             for (g.table.roots()) |r| d.scanner.enqueue(r.node) catch {
@@ -1070,6 +1073,19 @@ const Daemon = struct {
         }
     }
 
+    /// A folder denied before the stop may be readable now (a new permission), and no event says
+    /// so. Flags it like an event does; if it still fails, it stays denied.
+    fn recheckDenied(d: *Daemon) void {
+        var q: struct {
+            d: *Daemon,
+            fn visit(self: *@This(), id: NodeId) bool {
+                self.d.markOne(id);
+                return true;
+            }
+        } = .{ .d = d };
+        d.walkDenied(d.live, &q);
+    }
+
     /// After an allocation failure a flagged folder can be on no stack: queue every folder that
     /// still owes a read.
     fn recoverLost(d: *Daemon) void {
@@ -1165,18 +1181,29 @@ const Daemon = struct {
     }
 
     /// Fills `scratch` with the paths of folders that could not be read, each followed by NUL.
-    /// The walk descends only where the O(1) `state` says something is wrong.
     fn collectDenied(d: *Daemon, g: *const Generation) void {
-        var listed: usize = 0;
+        var lister: struct {
+            d: *Daemon,
+            g: *const Generation,
+            listed: usize = 0,
+            fn visit(self: *@This(), id: NodeId) bool {
+                self.g.table.pathOf(id, &self.d.scratch, self.d.gpa) catch return false;
+                self.d.scratch.append(self.d.gpa, 0) catch return false;
+                self.listed += 1;
+                return self.listed < max_denied_listed;
+            }
+        } = .{ .d = d, .g = g };
+        d.walkDenied(g, &lister);
+    }
+
+    /// Calls `ctx.visit(id)` for each denied folder until it returns false. Uses `d.walk`, so
+    /// `visit` must not. The walk descends only where the O(1) `state` says something is wrong,
+    /// so the cost follows the denied folders, not the table.
+    fn walkDenied(d: *Daemon, g: *const Generation, ctx: anytype) void {
         d.walk.clearRetainingCapacity();
         for (g.table.roots()) |r| d.walk.append(d.gpa, r.node) catch return;
         while (d.walk.pop()) |n| {
-            if (g.table.isDenied(n)) {
-                g.table.pathOf(n, &d.scratch, d.gpa) catch return;
-                d.scratch.append(d.gpa, 0) catch return;
-                listed += 1;
-                if (listed == max_denied_listed) return;
-            }
+            if (g.table.isDenied(n) and !ctx.visit(n)) return;
             var it = g.table.children(n);
             while (it.next()) |ch| {
                 if (g.table.state(ch) != .ok) d.walk.append(d.gpa, ch) catch return;
@@ -1531,4 +1558,36 @@ test "slow rule and back-off: the later of the two times wins" {
     try testing.expectEqual(@as(?i64, null), admitBoth(&s2, &b2, &t2, x, t0));
     try testing.expectEqual(@as(?i64, null), admitBoth(&s2, &b2, &t2, x, t0 + ns_per_s));
     try testing.expectEqual(@as(?i64, t0 + 3 * ns_per_s), admitBoth(&s2, &b2, &t2, x, t0 + 2 * ns_per_s));
+}
+
+test "recheckDenied: flags and queues the denied folders, nothing else" {
+    const ta = testing.allocator;
+    var t = try slowTable(ta, &.{ "a", "b" });
+    const b = t.lookup("/r/b").?;
+    var fresh: std.ArrayList(NodeId) = .empty;
+    defer fresh.deinit(ta);
+    _ = try t.applyRead(t.lookup("/r/a").?, 0, &.{}, &fresh, ta); // new folders start `pending`
+    _ = try t.applyDenied(b);
+    var g: Generation = undefined;
+    g.table = t;
+    defer g.table.deinit();
+    var d: Daemon = undefined;
+    d.gpa = ta;
+    d.live = &g;
+    d.walk = .empty;
+    d.dirty = .empty;
+    d.flush_at = null;
+    d.live_stale = true;
+    d.recover = false;
+    d.now = 0;
+    defer d.walk.deinit(ta);
+    defer d.dirty.deinit(ta);
+
+    d.recheckDenied();
+    try testing.expectEqualSlices(NodeId, &.{b}, d.dirty.items);
+    try testing.expect(g.table.needsRead(b));
+    try testing.expect(!g.table.needsRead(g.table.lookup("/r/a").?));
+    try testing.expect(!g.table.needsRead(g.table.lookup("/r").?));
+    try testing.expect(g.table.isDenied(b)); // the flag goes only when a read succeeds
+    try testing.expect(d.flush_at != null);
 }
