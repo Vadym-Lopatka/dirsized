@@ -40,7 +40,7 @@ src/watch_darwin.zig         FSEvents watcher
 src/watch_linux.zig          inotify watcher
 src/snapshot.zig             snapshot file
 src/daemon.zig               the daemon: poll loop, generations, debounce, config reload
-dist/                        launchd plist and systemd unit
+dist/                        launchd plist, systemd unit, macOS signing script
 emacs/                       Emacs client for Dired (dirsized.el, tests, fake server, README)
 test/e2e.sh                  end-to-end test, same script on macOS and in Docker
 test/docker.sh               runs e2e.sh in Debian, Fedora and Alpine containers

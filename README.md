@@ -42,6 +42,9 @@ make install
 ```
 
 This puts the binary in `~/.local/bin` and starts a service for your user (`launchd` on macOS, `systemd --user` on Linux).
+
+On macOS the first `make install` stops before it starts the daemon. It opens the Full Disk Access settings. Add `~/.local/bin/dirsized` there, then run `make install` again.
+You do this one time: the binary gets a fixed local signature, so later builds keep the permission. Without it, macOS asks you about each protected folder.
 Check it:
 
 ```sh
@@ -116,7 +119,7 @@ More in [emacs/README.md](emacs/README.md).
 - Sizes are file lengths, as `ls -l` shows. They are not disk blocks, so the number can differ from `du`. Hard links count in each folder. Symbolic links and other volumes are skipped.
 - Until the first scan ends, answers have the state `scanning`.
 - macOS sends no event while a program keeps a file open. The size grows when the program closes the file.
-- macOS protects some folders (for example `~/Library/Mail`). They get the state `partial`, and `status` lists them. Give Full Disk Access to the binary to count them. Then restart the daemon (macOS: `launchctl kickstart -k gui/$(id -u)/local.dirsized`). It reads these folders again at each start.
+- macOS protects some folders (for example `~/Library/Mail`). Without Full Disk Access they get the state `partial`, and `status` lists them. If you give the permission later, restart the daemon: `launchctl kickstart -k gui/$(id -u)/local.dirsized`.
 - Linux uses one inotify watch for each folder. If `status` shows that `watches` reaches `watch_limit`, raise it: `sudo sysctl fs.inotify.max_user_watches=1048576`.
 - Linux is tested in Docker (Debian, Fedora, Alpine). The `systemd` service and btrfs subvolumes are not yet tested on a real computer. Reports are welcome.
 
@@ -133,7 +136,7 @@ More in [emacs/README.md](emacs/README.md).
 
 ```sh
 make uninstall             # binary, service, socket, snapshot
-make uninstall PURGE=1     # also the config file
+make uninstall PURGE=1     # also the config file and the signing identity
 ```
 
 ## Inside

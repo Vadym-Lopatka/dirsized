@@ -19,15 +19,28 @@ ifeq ($(UNAME_S),Darwin)
 	launchctl bootout gui/$$(id -u)/local.dirsized 2>/dev/null || true
 	$(WAIT_GONE)
 	sed "s|@HOME@|$(XML_HOME)|g" dist/local.dirsized.plist > ~/Library/LaunchAgents/local.dirsized.plist
-	launchctl bootstrap gui/$$(id -u) ~/Library/LaunchAgents/local.dirsized.plist
+	@sh dist/sign-macos.sh ~/.local/bin/dirsized; case $$? in \
+	0) launchctl bootstrap gui/$$(id -u) ~/Library/LaunchAgents/local.dirsized.plist && \
+	   echo "Installed. Check with: dirsized status" ;; \
+	3) open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"; \
+	   open -R ~/.local/bin/dirsized; \
+	   printf '%s\n' \
+	   "First install: the daemon is not started yet." \
+	   "Without Full Disk Access, macOS asks you about each protected folder." \
+	   "  1. In System Settings > Privacy & Security > Full Disk Access, add ~/.local/bin/dirsized" \
+	   "     (both windows are open now)." \
+	   "  2. Run: make install" \
+	   "You do this one time. Later builds keep the permission." ;; \
+	*) echo "could not sign ~/.local/bin/dirsized" >&2; exit 1 ;; \
+	esac
 else
 	install -D -m 755 zig-out/bin/dirsized ~/.local/bin/dirsized
 	install -D -m 644 dist/dirsized.service ~/.config/systemd/user/dirsized.service
 	systemctl --user daemon-reload
 	systemctl --user enable dirsized
 	systemctl --user restart dirsized
-endif
 	@echo "Installed. Check with: dirsized status"
+endif
 
 uninstall:
 ifeq ($(UNAME_S),Darwin)

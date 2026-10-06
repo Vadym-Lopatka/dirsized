@@ -292,6 +292,16 @@ macOS prevents access to some folders, for example `~/Library/Mail`.
 The daemon gives the state `partial` to such a folder and to its parents. The `status` command shows each such folder (at most 100).
 To include these folders, give the "Full Disk Access" permission to the binary.
 
+Without this permission, macOS shows a dialog for each kind of protected folder that the daemon reads.
+macOS connects a permission to the signature of a program. The linker signs each build with its hash, thus each build is a new program for macOS, and the permission is lost.
+For this reason `make install` signs the binary with a fixed identity (`dist/sign-macos.sh`):
+
+- The identity is a self-signed certificate. The script makes it one time and keeps it in the file `~/.config/dirsized/signing.keychain-db`.
+- The script does not use the login keychain. Thus macOS shows no dialog during the installation.
+- The requirement that macOS records is the identifier `local.dirsized` and this certificate. A new build has the same requirement, and it keeps the permission.
+- The first installation does not start the daemon. It opens the settings, and the user gives the permission. The second `make install` starts the daemon.
+- A cost: each program that runs as the user can read the keychain file and sign with the identity. Such a program then gets the permissions of `dirsized`.
+
 ## 9. Linux
 
 ### Decision: `inotify`, with no privileges
@@ -549,7 +559,7 @@ You can do the commands manually. The result is the same.
 | `make build` | Builds the binary |
 | `make install` | Installs the binary and the service for the current user |
 | `make uninstall` | Removes the binary, the service, and the cache folder (socket, snapshot file, lock file, log) |
-| `make uninstall PURGE=1` | Also removes the configuration file |
+| `make uninstall PURGE=1` | Also removes the configuration file and the signing identity |
 | `make test` | Does the unit tests and the full test on this computer |
 | `make test-emacs` | Does the tests of the Emacs client in a batch Emacs |
 | `make test-linux` | Builds for Linux, does the Linux unit tests, and does the full test in Docker |
@@ -574,6 +584,7 @@ install -m 755 zig-out/bin/dirsized ~/.local/bin/dirsized
 install -d ~/Library/LaunchAgents
 launchctl bootout gui/$(id -u)/local.dirsized 2>/dev/null   # only if an older copy runs
 sed "s|@HOME@|$HOME|g" dist/local.dirsized.plist > ~/Library/LaunchAgents/local.dirsized.plist
+sh dist/sign-macos.sh ~/.local/bin/dirsized    # fixed signature; see section 8, "Protected folders"
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.dirsized.plist
 ```
 
