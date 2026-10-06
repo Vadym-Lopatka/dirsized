@@ -5,17 +5,10 @@
 
 **Folder sizes, instantly.** A tiny daemon that always knows the size of every folder.
 
-```console
-$ time du -sh ~/prog
-228G    /Users/me/prog
-47.09 s
-
-$ time dirsized -h ~/prog
-302G    ok      /Users/me/prog
-0.004 s
-```
-
-Same folder: 2.45 million files. (`du` counts disk blocks, `dirsized` counts file lengths, so the totals differ.)
+| The same folder, 2.45 million files | Time |
+|---|---|
+| `du -sh ~/prog` | 47 s |
+| `dirsized -h ~/prog` | 0.004 s |
 
 ## Why
 
@@ -119,7 +112,7 @@ More in [emacs/README.md](emacs/README.md).
 
 ## Good to know
 
-- Sizes are file lengths, as `ls -l` shows. They are not disk blocks. Hard links count in each folder. Symbolic links and other volumes are skipped.
+- Sizes are file lengths, as `ls -l` shows. They are not disk blocks, so the number can differ from `du`. Hard links count in each folder. Symbolic links and other volumes are skipped.
 - Until the first scan ends, answers have the state `scanning`.
 - macOS sends no event while a program keeps a file open. The size grows when the program closes the file.
 - macOS protects some folders (for example `~/Library/Mail`). They get the state `partial`, and `status` lists them. Give Full Disk Access to the binary to count them.
