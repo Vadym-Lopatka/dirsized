@@ -55,6 +55,7 @@ else
 	-systemctl --user daemon-reload 2>/dev/null || true
 	-rm ~/.local/bin/dirsized
 	-rm -rf "$${XDG_CACHE_HOME:-$$HOME/.cache}/dirsized"
+	-[ -z "$$XDG_RUNTIME_DIR" ] || rm -rf "$$XDG_RUNTIME_DIR/dirsized"
 endif
 ifeq ($(PURGE),1)
 	-rm -rf ~/.config/dirsized
