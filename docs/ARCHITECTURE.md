@@ -308,7 +308,8 @@ Command surface and exit codes are exactly DESIGN.md section 12. Without a daemo
   (1024-based, `K M G T`, one decimal below 10). `--json` prints one array of
   `{"path":..., "bytes":..., "state":...}`; path bytes that are not valid UTF-8 are escaped as `\u00XX`.
 - `-l` sorts by size, largest first; ties by name. `-n N` cuts after sorting.
-- Unknown flag or bad usage -> message on stderr, exit 2. `--help`, `--version` -> exit 0.
+- Unknown flag or bad usage -> message on stderr, exit 2. `help` (a command word like `status`; no PATH) and `--help` print the same text.
+  `--version` prints the version. Both exit 0. There is no `-?`.
 - Paths are made absolute and real (`realpath`) before use.
 
 ## Daemon contracts

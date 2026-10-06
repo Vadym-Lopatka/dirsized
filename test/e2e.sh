@@ -373,17 +373,27 @@ test_exit_codes() {
     run "$BIN" --help
     assert_rc "--help" 0
     assert_grep "--help shows usage" "Usage:" "$OUT"
+    cp "$OUT" "$T/help.out"
+    run "$BIN" help
+    assert_rc "help" 0
+    assert_str "help prints the same as --help" "$(cat "$T/help.out")" "$(cat "$OUT")"
+    assert_empty "help leaves stderr empty" "$ERR"
     run "$BIN" "-?"
-    assert_rc "-? is help" 0
+    assert_rc "-? is an unknown option" 2
+    assert_grep "-? is named in the error" "unknown option -?" "$ERR"
+    run "$BIN" help extra
+    assert_rc "help takes no PATH" 2
     run "$BIN" --version
     assert_str "--version" "dirsized 0.1.0" "$(cat "$OUT")"
     run ds -- "$LST"
     assert_rc "-- ends options" 0
-    mkdir -p "$T/dashes/-l/sub" "$T/dashes/status"
+    mkdir -p "$T/dashes/-l/sub" "$T/dashes/status" "$T/dashes/help"
     ( cd "$T/dashes" && ds -0 -- -l ) >"$OUT" 2>"$ERR"
     assert_str "-- lets a PATH start with a dash" "$T/dashes/-l" "$(lines <"$OUT" | cut -f3)"
     ( cd "$T/dashes" && ds ./status ) >"$OUT" 2>"$ERR"
     assert_str "./status is a folder, not the command" "$T/dashes/status" "$(cut -f3 "$OUT")"
+    ( cd "$T/dashes" && ds ./help ) >"$OUT" 2>"$ERR"
+    assert_str "./help is a folder, not the command" "$T/dashes/help" "$(cut -f3 "$OUT")"
     "$BIN" --scan -l "$TREE" 2>"$ERR" | head -1 >/dev/null
     assert_empty "a closed stdout (| head -1) is quiet" "$ERR"
 }

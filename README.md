@@ -73,7 +73,8 @@ Exit codes: 0 all `ok`; 1 a path is missing, excluded or outside the roots; 2 ba
 3 daemon not running; 4 a value is not final (`scanning`, `partial`, `stale`).
 If several apply, the order is 2, 3, 1, 4.
 
-All commands and options: `dirsized --help`.
+All commands and options: `dirsized help`.
+The help is complete. A script or an AI agent can use the tool from that one command.
 
 ## Configure
 

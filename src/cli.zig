@@ -20,51 +20,65 @@ const Table = @import("table.zig").Table;
 const version = "dirsized " ++ daemon.version;
 
 const help_text =
-    \\dirsized: the size of every folder
+    \\dirsized - the size of every folder, at once
+    \\
+    \\A daemon keeps the total size of each folder in memory and follows the disk.
+    \\This command asks the daemon. An answer needs no scan.
     \\
     \\Usage:
-    \\  dirsized [OPTIONS] [PATH...]   size of each PATH (default ".")
-    \\  dirsized -l [OPTIONS] [PATH]   child folders of PATH, largest first
-    \\  dirsized status [--json]       state of the daemon, as key: value lines
-    \\  dirsized check [PATH]          check the config file; tell if PATH is counted
-    \\  dirsized daemon                run the daemon in the foreground
+    \\  dirsized [OPTION]... [PATH]...   size of each PATH (default: .)
+    \\  dirsized -l [OPTION]... [PATH]   child folders of PATH, largest first
+    \\  dirsized status [--json]         state of the daemon
+    \\  dirsized check [PATH]            is the config correct? is PATH counted?
+    \\  dirsized daemon                  run the daemon in the foreground
+    \\  dirsized help                    show this text (also --help)
     \\
     \\Options:
-    \\  -l          list the child folders of PATH (at most one PATH)
-    \\  -n N        keep only the first N records (after sorting, with -l)
-    \\  -h          sizes as K, M, G, T (1024-based, like ls -h)
-    \\  -0          end each record with NUL instead of newline
-    \\  --json      one JSON array of {"path","bytes","state"}; bytes are never -h
-    \\  --scan      if no daemon runs: read the disk now
-    \\  -?, --help  this text
-    \\  --version   print the version
-    \\  --          end of options (a PATH may start with "-")
+    \\  -l         list the child folders of PATH
+    \\  -n N       print only the first N records
+    \\  -h         sizes as K, M, G, T (powers of 1024)
+    \\  -0         end each record with NUL, not newline
+    \\  --json     print a JSON array of {"path","bytes","state"}
+    \\  --scan     with no daemon: read the disk now (slow)
+    \\  --version  print the version
+    \\  --         end of options
     \\
-    \\Output: BYTES<TAB>STATE<TAB>PATH, one line per record. BYTES is the sum of the
-    \\file lengths below the folder (like ls -l). Symlinks and other volumes are skipped.
-    \\STATE: ok, scanning, partial, stale, excluded, none (not a folder).
-    \\Paths are absolute and real. In JSON, bytes that are not UTF-8 appear as \u00XX.
-    \\Use -0 for lossless paths.
+    \\Output: one record per line, BYTES<TAB>STATE<TAB>PATH.
+    \\BYTES is the sum of the file lengths below the folder, as ls -l shows them.
+    \\PATH is absolute, with symbolic links resolved (not for a missing path).
     \\
-    \\The first word that is not an option may name a command. A folder called
-    \\status, check or daemon is written ./status.
+    \\States:
+    \\  ok        the size is final
+    \\  scanning  a scan still runs; the size still grows
+    \\  stale     the daemon catches up after a start or config change; ask again soon
+    \\  partial   a folder below could not be read; "status" lists them
+    \\  excluded  a rule in the config skips this folder
+    \\  none      missing, not a folder, or outside the roots
     \\
-    \\The daemon keeps all sizes in memory and follows the disk. Its config file is
-    \\~/.config/dirsized/config.toml (see "check").
+    \\Exit status:
+    \\  0  every size is ok
+    \\  1  a path is missing, not a folder, excluded or outside the roots
+    \\  2  bad usage or bad config
+    \\  3  the daemon does not run (start it, or use --scan)
+    \\  4  a size is not final (scanning, stale, partial)
+    \\  If several apply, the first of 2, 3, 1, 4 wins.
     \\
-    \\Exit: 0 all ok; 1 a path is missing, not a folder, excluded or outside the roots;
-    \\2 bad usage or config (also internal errors); 3 daemon not running;
-    \\4 a value is not final (scanning, partial, stale). If several apply: 2, 3, 1, 4.
+    \\Config: ~/.config/dirsized/config.toml. The daemon sees a change by itself,
+    \\after the next query.
+    \\  roots = ["~"]                                    # folders to follow
+    \\  exclude = ["node_modules/", "/Library/Caches/"]  # .gitignore syntax
     \\
     \\Examples:
-    \\  dirsized -lh ~/prog              what is big under ~/prog?
-    \\  dirsized status                  is the daemon done scanning?
-    \\  dirsized -ln 5 -0 .              the 5 largest child folders, NUL-separated
-    \\  dirsized check ~/prog/app        is this folder counted, and why?
+    \\  dirsized -lh ~/prog          what is big under ~/prog?
+    \\  dirsized --json ~/a ~/b      sizes for a program
+    \\  dirsized check ~/prog/app    is this folder counted? which rule decides?
+    \\  dirsized status              is the first scan done?
+    \\
+    \\A folder named status, check, daemon or help is written ./status.
     \\
 ;
 
-const Command = enum { size, status, check, daemon };
+const Command = enum { size, status, check, daemon, help };
 const Action = enum { run, help, version };
 
 pub const Options = struct {
@@ -115,7 +129,6 @@ pub fn parse(arena: Allocator, args: []const []const u8, usage: *Usage) error{ U
                 'l' => o.list = true,
                 'h' => o.human = true,
                 '0' => o.nul = true,
-                '?' => return .{ .action = .help },
                 'n' => {
                     // `-n5`, `-hn5` and `-n 5` all work, as in ordinary tools.
                     const value = if (j + 1 < a.len) a[j + 1 ..] else if (i + 1 < args.len) blk: {
@@ -132,7 +145,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, usage: *Usage) error{ U
     }
 
     var rest = words.items;
-    if (rest.len > 0) for ([_]Command{ .status, .check, .daemon }) |c| {
+    if (rest.len > 0) for ([_]Command{ .status, .check, .daemon, .help }) |c| {
         if (std.mem.eql(u8, rest[0], @tagName(c))) {
             o.command = c;
             rest = rest[1..];
@@ -146,6 +159,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, usage: *Usage) error{ U
         if (rest.len > @as(usize, if (o.command == .check) 1 else 0))
             return usage.set("{t} takes {s}", .{ o.command, if (o.command == .check) "at most one PATH" else "no PATH" });
     }
+    if (o.command == .help) o.action = .help;
     if (o.json and o.nul) return usage.set("--json and -0 cannot be used together", .{});
     if (o.list and rest.len > 1) return usage.set("-l takes at most one PATH", .{});
     o.paths = rest;
@@ -688,6 +702,7 @@ fn dispatch(env: Env, o: Options, w: *std.Io.Writer, code: *u8) Stop!void {
         },
         .status => try statusCommand(env, o, w),
         .daemon => unreachable, // `run` hands it to daemon.run before it gets here
+        .help => unreachable, // the action is .help, handled above
         .check => code.* = try check(env, o, w),
     }
     try w.flush();
@@ -721,7 +736,8 @@ test "parse: valid command lines" {
         .{ .args = &.{ "./status", "check" }, .expect = .{ .paths = &.{ "./status", "check" } } },
         .{ .args = &.{ "a", "status" }, .expect = .{ .paths = &.{ "a", "status" } } },
         .{ .args = &.{"--help"}, .expect = .{ .action = .help } },
-        .{ .args = &.{"-?"}, .expect = .{ .action = .help } },
+        .{ .args = &.{"help"}, .expect = .{ .action = .help, .command = .help } },
+        .{ .args = &.{ "./help", "help" }, .expect = .{ .paths = &.{ "./help", "help" } } },
         .{ .args = &.{ "--help", "--bogus" }, .expect = .{ .action = .help } },
         .{ .args = &.{"--version"}, .expect = .{ .action = .version } },
     };
@@ -763,11 +779,30 @@ test "parse: usage errors" {
         .{ .args = &.{ "status", "-l" }, .msg = "status takes no output options" },
         .{ .args = &.{ "check", "--json" }, .msg = "check takes no output options" },
         .{ .args = &.{ "daemon", "-h" }, .msg = "daemon takes no output options" },
+        .{ .args = &.{ "help", "a" }, .msg = "help takes no PATH" },
+        .{ .args = &.{ "help", "-l" }, .msg = "help takes no output options" },
+        .{ .args = &.{"-?"}, .msg = "unknown option -?" },
     };
     for (cases) |c| {
         var usage: Usage = .{};
         try std.testing.expectError(error.Usage, parse(arena.allocator(), c.args, &usage));
         try std.testing.expectEqualStrings(c.msg, usage.msg);
+    }
+}
+
+test "help: at most 80 columns, the same for help and --help" {
+    var lines = std.mem.splitScalar(u8, help_text, '\n');
+    while (lines.next()) |l| try std.testing.expect(l.len <= 80);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var out: [2][8192]u8 = undefined;
+    for (&out, [_][]const u8{ "help", "--help" }) |*buf, arg| {
+        var usage: Usage = .{};
+        const o = try parse(arena.allocator(), &.{arg}, &usage);
+        var w = std.Io.Writer.fixed(buf);
+        var code: u8 = 0;
+        try dispatch(undefined, o, &w, &code);
+        try std.testing.expectEqualStrings(help_text, w.buffered());
     }
 }
 
