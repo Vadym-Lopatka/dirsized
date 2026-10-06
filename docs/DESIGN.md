@@ -416,19 +416,24 @@ dirsized -l [PATH]     child folders with their sizes, largest first
 dirsized status        state of the daemon, as key: value lines
 dirsized check [PATH]  check of the configuration file
 dirsized daemon        run the daemon in the foreground
+dirsized help          the help text, on stdout; `--help` is the same
 ```
+
+The help is plain text of at most 80 columns. It is complete: a program or an AI agent can use the tool from it.
+`help` is a command word like `status`. It takes no PATH and no output option (`help x` is a usage error).
+There is no `-?` option. With no argument, the command gives the size of `.` and never the help.
 
 | Flag | Function |
 |---|---|
 | `-h` | Sizes with units: K, M, G |
 | `-n N` | Only the N largest |
-| `--json` | One JSON array of `{"path","bytes","state"}`. `bytes` is never in units. With `status`: one JSON object. A repeated key becomes an array. |
-| `-0` | NUL character between the records |
+| `--json` | One JSON array of `{"path","bytes","state"}`. `bytes` is never in units. With `status`: one JSON object. A repeated key becomes an array. A byte of a path that is not UTF-8 is written as `\u00XX`. |
+| `-0` | NUL character between the records. Use it for lossless paths: the path bytes are exact. |
 | `--scan` | If the daemon does not run, read the disk directly. If the daemon runs, it answers. |
 | `--` | End of the options. A path can start with `-`. |
 
 The default output has one line for each path: `BYTES<TAB>STATE<TAB>PATH`.
-If a folder has the name of a command, write it as a path, for example `./status`.
+If a folder has the name of a command (`status`, `check`, `daemon`, `help`), write it as a path, for example `./status`.
 
 `dirsized check` shows each error in the file with its line number.
 `dirsized check PATH` also shows the rule that excludes or includes that path.
@@ -664,7 +669,7 @@ A system without `systemd` can start the daemon with the command `dirsized daemo
 ### 16.0 What exists now
 
 - Unit tests: `zig build test` runs them. On macOS, 169 tests pass.
-- `test/e2e.sh`: 199 checks on macOS. The checks on Linux in Docker are 193 for each image.
+- `test/e2e.sh`: 205 checks on macOS. The checks on Linux in Docker are 199 for each image.
 - `test/linux-unit.sh`: builds the unit tests of `scan_linux.zig` and `watch_linux.zig` for Linux and runs them in a clean container as a non-root user. 115 tests pass.
 - `test/docker.sh`: runs `test/e2e.sh` as a non-root user (uid 1000, all capabilities dropped, `no-new-privileges`) on Debian, Fedora, and Alpine. 0 checks failed on each image.
 - `emacs/dirsized-tests.el`: 33 tests. One of them runs against the real daemon. The others use a fake server. `make test-emacs` runs them.
