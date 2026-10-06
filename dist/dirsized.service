@@ -1,0 +1,17 @@
+[Unit]
+Description=Daemon to keep folder sizes in memory
+
+[Service]
+ExecStart=%h/.local/bin/dirsized daemon
+Restart=on-failure
+RestartSec=2
+RestartPreventExitStatus=2
+Nice=5
+Type=simple
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target
