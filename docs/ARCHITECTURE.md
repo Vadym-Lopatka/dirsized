@@ -418,8 +418,9 @@ Then it calls `drain` again, because a result that was applied can owe a re-read
   byte to `wake_fd`. Blob = per device: UUID (`FSEventsCopyUUIDForDevice`) + last event id at the
   checkpoint. `start` returns `.fresh` when the blob is missing, a UUID differs, or a saved id is
   above the current event id (the ids wrapped). `checkpoint` takes the highest id that `drain`
-  gave out. On a quiet disk no id moves. Then `checkpoint` takes the current event id, flushes the
-  streams (`FSEventStreamFlushSync`), and keeps that id only if no event is buffered. It does
+  gave out. `checkpoint` never takes the
+  current event id, because it can be ahead of what the stream delivered. On a quiet disk no id
+  moves, and a restart replays more. It does
   nothing while a stream still replays history.
   Flags `MustScanSubDirs`, `UserDropped`, `KernelDropped`, `RootChanged`, `Mount` and `Unmount` ->
   `subtree = true`. Flags `UserDropped`, `KernelDropped` and `EventIdsWrapped` also give

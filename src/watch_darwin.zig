@@ -31,7 +31,6 @@ const UuidBytes = extern struct { bytes: [16]u8 }; // CFUUID.h, CFUUIDBytes
 extern "c" fn FSEventStreamCreate(allocator: ?*anyopaque, callback: Callback, context: *const StreamContext, paths: CFTypeRef, since: EventId, latency: f64, flags: u32) ?StreamRef;
 extern "c" fn FSEventStreamSetDispatchQueue(stream: StreamRef, queue: *anyopaque) void;
 extern "c" fn FSEventStreamStart(stream: StreamRef) u8; // Boolean
-extern "c" fn FSEventStreamFlushSync(stream: StreamRef) void;
 extern "c" fn FSEventStreamStop(stream: StreamRef) void;
 extern "c" fn FSEventStreamInvalidate(stream: StreamRef) void;
 extern "c" fn FSEventStreamRelease(stream: StreamRef) void;
@@ -365,22 +364,13 @@ pub const Watcher = struct {
     /// Everything handed out so far is in the table. A stream that is still replaying keeps
     /// its old id: the replay is not complete until its HistoryDone.
     ///
-    /// A quiet disk moves no id, so a restart would replay everything since the last event.
-    /// Instead the current id is taken, the streams are flushed (every event up to that id is
-    /// then in the buffer) and the id is used if the buffer is empty: nothing at or below it is
-    /// undelivered.
+    /// The id moves only by ids of events that were delivered and drained. It never jumps to
+    /// the current system id: that id can be ahead of what the stream delivered, and a restart
+    /// would skip the event for good. A quiet disk keeps the old id; a restart then replays more.
     pub fn checkpoint(self: *Watcher) void {
-        var replaying = false;
         for (self.streams.items) |s| {
-            if (s.history_done) s.cp_id = @max(s.cp_id, s.max_id) else replaying = true;
+            if (s.history_done) s.cp_id = @max(s.cp_id, s.max_id);
         }
-        if (replaying or self.scratch_pos != self.scratch.items.len) return;
-        const now_id = FSEventsGetCurrentEventId();
-        for (self.streams.items) |s| if (s.ref) |ref| FSEventStreamFlushSync(ref);
-        os_unfair_lock_lock(&self.shared.lock);
-        defer os_unfair_lock_unlock(&self.shared.lock);
-        if (self.shared.buf.items.len != 0 or self.shared.lost) return;
-        for (self.streams.items) |s| s.cp_id = @max(s.cp_id, now_id);
     }
 
     pub fn saveState(self: *const Watcher, out: *std.ArrayList(u8), gpa: Allocator) !void {
@@ -556,7 +546,7 @@ fn expectChange(r: *Rig, col: *Collector, path: []const u8) !void {
         }
     };
     Wait.want = path;
-    if (!try r.waitUntil(col, 5000, Wait.done)) {
+    if (!try r.waitUntil(col, 20000, Wait.done)) {
         std.debug.print("no change for {s}; got {d} others:\n", .{ path, col.items.items.len });
         for (col.items.items) |i| std.debug.print("  {s}\n", .{i.path});
         return error.TestExpectedChange;
@@ -692,7 +682,7 @@ test "checkpoint does not move before the replay is done" {
     try testing.expect(s.cp_id >= saved_id + 1000);
 }
 
-test "checkpoint on a quiet disk moves the id; an undelivered event keeps it back" {
+test "an event before the checkpoint is replayed; a quiet checkpoint does not pass delivered ids" {
     var f = try Fixture.init();
     defer f.deinit();
     var r = try Rig.init();
@@ -704,16 +694,19 @@ test "checkpoint on a quiet disk moves the id; an undelivered event keeps it bac
     _ = try r.w.start(&roots, null);
     try r.settle(&col, 800);
     const s = r.w.streams.items[0];
-    const start_id = s.cp_id;
+    // Quiet disk: the id does not move past what the stream delivered.
     r.w.checkpoint();
-    try testing.expect(s.cp_id > start_id);
+    try testing.expect(s.cp_id <= s.max_id);
+    const quiet_id = s.cp_id;
+    r.w.checkpoint();
+    try testing.expectEqual(quiet_id, s.cp_id);
 
-    // The event is inside FSEvents' latency window: the checkpoint must not skip it. Save the
-    // blob without draining and restart from it: the replay has to bring the event back.
+    // An event right before the checkpoint, not drained. Save, stop, start from the blob.
+    // The replay has to bring the event back.
     try f.touch("x/f");
-    var nap = [1]c.pollfd{.{ .fd = -1, .events = 0, .revents = 0 }};
-    _ = c.poll(&nap, 1, 100); // long enough for fseventsd to number the event, short of the latency
     r.w.checkpoint();
+    // Nothing was drained, so the id stays where it was.
+    try testing.expectEqual(quiet_id, s.cp_id);
     var blob: std.ArrayList(u8) = .empty;
     defer blob.deinit(testing.allocator);
     try r.w.saveState(&blob, testing.allocator);

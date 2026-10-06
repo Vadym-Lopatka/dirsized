@@ -267,7 +267,8 @@ Linux does not have this limit, because `inotify` sends an event for each write.
 
 FSEvents keeps the event history on the disk. Each event has an ID.
 The snapshot file contains the ID of the last event that the daemon applied (the checkpoint).
-On a quiet disk no event moves the ID. Then the daemon takes the current event ID after a flush of the streams (`FSEventStreamFlushSync`), if no event waits.
+The ID moves only by the IDs of events that FSEvents delivered and the daemon applied. The daemon never takes the current system event ID: it can be ahead of the delivered events, and a restart would lose an event.
+After a long quiet time, a restart replays more history. This is harmless.
 After a restart, the daemon gets all the events from that ID and applies the update rule.
 At each start, the daemon also reads each denied folder again. A permission can change while the daemon is off, and FSEvents does not always report that change.
 The replayed event IDs are not in order. The daemon keeps the maximum ID.
