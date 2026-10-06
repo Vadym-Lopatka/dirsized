@@ -668,7 +668,7 @@ A system without `systemd` can start the daemon with the command `dirsized daemo
 
 ### 16.0 What exists now
 
-- Unit tests: `zig build test` runs them. On macOS, 169 tests pass.
+- Unit tests: `zig build test` runs them. On macOS, 170 tests pass.
 - `test/e2e.sh`: 205 checks on macOS. The checks on Linux in Docker are 199 for each image.
 - `test/linux-unit.sh`: builds the unit tests of `scan_linux.zig` and `watch_linux.zig` for Linux and runs them in a clean container as a non-root user. 115 tests pass.
 - `test/docker.sh`: runs `test/e2e.sh` as a non-root user (uid 1000, all capabilities dropped, `no-new-privileges`) on Debian, Fedora, and Alpine. 0 checks failed on each image.
